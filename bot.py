@@ -185,41 +185,20 @@ def haber_seviyesi(baslik: str) -> str:
             return "onemli"
     return None
 
-# --- ANLIK KRİTİK BİLDİRİM (AI analizli) ---
-async def kritik_haber_gonder(context, baslik: str, seviye: str):
-    """Tek bir kritik/önemli haberi AI yorumuyla anında gönderir."""
-    try:
-        response = await ai_client.chat.completions.create(
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Bu haber başlığını 1-2 cümleyle Türkçe yorumla, "
-                    f"piyasaya (borsa, dolar, altın) olası etkisini belirt: '{baslik}'"
-                )
-            }],
-            model="llama-3.3-70b-versatile",
-            temperature=0.2
-        )
-        yorum = response.choices[0].message.content.strip()
-    except:
-        yorum = "⚠️ AI yorum yapamadı."
-
-    emoji = "🚨" if seviye == "kritik" else "⚠️"
-    etiket = "KRİTİK UYARI" if seviye == "kritik" else "ÖNEMLİ HABER"
-    mesaj = f"{emoji} **{etiket}**\n\n📰 {baslik}\n\n💬 {yorum}"
-
-    for cid in ALICI_LISTESI:
+# --- ORTAK MESAJ GÖNDERME ---
+async def mesaj_gonder(bot, hedefler: list, metin: str):
+    for cid in hedefler:
         try:
-            await context.bot.send_message(chat_id=cid, text=mesaj, parse_mode="Markdown")
-        except:
-            continue
+            await bot.send_message(chat_id=cid, text=metin, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Mesaj gönderilemedi ({cid}): {e}")
 
-# --- HABER TARAMA DÖNGÜSÜ (15 dakikada bir çalışır) ---
-async def haber_tara(context: ContextTypes.DEFAULT_TYPE):
-    """RSS kaynaklarını tarar; kritik/önemli yeni haberleri anında gönderir."""
-    saat = (datetime.now(timezone.utc) + timedelta(hours=3)).hour
-    if 0 <= saat < 7:
-        return  # Gece modu
+# --- HABER TARAMA ÇEKİRDEĞİ ---
+async def haber_tara_cekirdek(bot, hedefler: list, gece_modu: bool = True):
+    if gece_modu:
+        saat = (datetime.now(timezone.utc) + timedelta(hours=3)).hour
+        if 0 <= saat < 7:
+            return
 
     kaynaklar = [
         "https://tr.investing.com/rss/news_285.rss",
@@ -228,7 +207,6 @@ async def haber_tara(context: ContextTypes.DEFAULT_TYPE):
         "https://tr.investing.com/rss/market_overview.rss",
         "https://www.coindesk.com/arc/outboundfeeds/rss/"
     ]
-
     headers = {'User-Agent': 'Mozilla/5.0'}
     yeni_kritik = []
     yeni_onemli = []
@@ -238,7 +216,6 @@ async def haber_tara(context: ContextTypes.DEFAULT_TYPE):
             feed = feedparser.parse(requests.get(url, headers=headers, timeout=10).content)
             for entry in feed.entries[:20]:
                 baslik = entry.title.strip()
-                # Daha önce gönderildiyse atla
                 if baslik in gonderilen_haberler:
                     continue
                 seviye = haber_seviyesi(baslik)
@@ -251,33 +228,45 @@ async def haber_tara(context: ContextTypes.DEFAULT_TYPE):
         except:
             continue
 
-    # Kritik haberleri hemen gönder (tek tek, anında)
+    # Kritik haberleri tek tek AI yorumuyla gönder
     for baslik in yeni_kritik:
-        await kritik_haber_gonder(context, baslik, "kritik")
-        await asyncio.sleep(1)  # Telegram flood koruması
+        try:
+            resp = await ai_client.chat.completions.create(
+                messages=[{"role": "user", "content": (
+                    f"Bu haber başlığını 1-2 cümleyle Türkçe yorumla, "
+                    f"piyasaya (borsa, dolar, altın) olası etkisini belirt: '{baslik}'"
+                )}],
+                model="llama-3.3-70b-versatile",
+                temperature=0.2
+            )
+            yorum = resp.choices[0].message.content.strip()
+        except:
+            yorum = "⚠️ AI yorum yapamadı."
+        await mesaj_gonder(bot, hedefler, f"🚨 *KRİTİK UYARI*\n\n📰 {baslik}\n\n💬 {yorum}")
+        await asyncio.sleep(1)
 
-    # Önemli haberleri tek mesajda grupla (max 5 adet)
+    # Önemli haberleri gruplu gönder
     if yeni_onemli:
         ozet = "\n".join([f"• {b}" for b in yeni_onemli[:5]])
-        mesaj = f"📌 **YENİ ÖNEMLİ HABERLER**\n\n{ozet}"
-        for cid in ALICI_LISTESI:
-            try:
-                await context.bot.send_message(chat_id=cid, text=mesaj, parse_mode="Markdown")
-            except:
-                continue
+        await mesaj_gonder(bot, hedefler, f"📌 *YENİ ÖNEMLİ HABERLER*\n\n{ozet}")
 
-    # Hafızayı temizle (çok büyümesin, son 500 başlık)
+    if not yeni_kritik and not yeni_onemli:
+        logging.info("Haber taraması: yeni kritik/önemli haber bulunamadı.")
+
+    # Hafıza temizliği
     if len(gonderilen_haberler) > 500:
-        # Setin yarısını temizle (basit yöntem)
         liste = list(gonderilen_haberler)
         gonderilen_haberler.clear()
         gonderilen_haberler.update(liste[-250:])
 
-# --- STRATEJİK ANALİZ MOTORU (saatlik rapor için) ---
+# --- JOB QUEUE SARMALAYICISI ---
+async def haber_tara(context: ContextTypes.DEFAULT_TYPE):
+    await haber_tara_cekirdek(context.bot, ALICI_LISTESI, gece_modu=True)
+
+# --- STRATEJİK ANALİZ MOTORU ---
 async def ai_stratejik_analiz(metin):
     if not metin or len(metin) < 20:
         return "📌 Şu an için kritik bir gelişme saptanmadı."
-
     prompt = f"""Sen kıdemli bir Finansal Stratejistsin. Haberleri analiz et.
     KURALLAR:
     1. Haberleri 'Önem Derecesine' göre sırala (🔴 Kritik, 🟡 Önemli).
@@ -286,7 +275,6 @@ async def ai_stratejik_analiz(metin):
     4. YORUM: Haberi ver ve bunun piyasaya etkisini TEK BİR kısa cümlede açıkla.
     5. Paragraf kullanma, madde madde yaz.
     Haberler: {metin}"""
-
     try:
         response = await ai_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -297,12 +285,12 @@ async def ai_stratejik_analiz(metin):
     except:
         return "⚠️ Analiz motoru meşgul."
 
-# --- SAATLIK TAM RAPOR ---
-async def rapor_gonder(context: ContextTypes.DEFAULT_TYPE):
-    saat = (datetime.now(timezone.utc) + timedelta(hours=3)).hour
-    if 0 <= saat < 8:
-        return
-
+# --- RAPOR ÇEKİRDEĞİ ---
+async def rapor_gonder_cekirdek(bot, hedefler: list, gece_modu: bool = True):
+    if gece_modu:
+        saat = (datetime.now(timezone.utc) + timedelta(hours=3)).hour
+        if 0 <= saat < 8:
+            return
     fiyatlar = anlik_piyasa_verisi()
     raw_news = ""
     kaynaklar = [
@@ -310,7 +298,6 @@ async def rapor_gonder(context: ContextTypes.DEFAULT_TYPE):
         "https://tr.investing.com/rss/news.rss", "https://tr.investing.com/rss/market_overview.rss",
         "https://www.coindesk.com/arc/outboundfeeds/rss/"
     ]
-
     headers = {'User-Agent': 'Mozilla/5.0'}
     for url in kaynaklar:
         try:
@@ -319,26 +306,26 @@ async def rapor_gonder(context: ContextTypes.DEFAULT_TYPE):
                 raw_news += f"{entry.title}. "
         except:
             continue
-
     analiz = await ai_stratejik_analiz(raw_news)
-    final_mesaj = f"{fiyatlar}\n\n{analiz}"
+    await mesaj_gonder(bot, hedefler, f"{fiyatlar}\n\n{analiz}")
 
-    for cid in ALICI_LISTESI:
-        try:
-            await context.bot.send_message(chat_id=cid, text=final_mesaj, parse_mode="Markdown")
-        except:
-            continue
+# --- JOB QUEUE SARMALAYICISI ---
+async def rapor_gonder(context: ContextTypes.DEFAULT_TYPE):
+    await rapor_gonder_cekirdek(context.bot, ALICI_LISTESI, gece_modu=True)
 
 # --- KOMUTLAR ---
 async def test_komutu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Komutu yazan kişinin chat_id'sine gönder, gece modunu atla
+    chat_id = str(update.effective_chat.id)
     msg = await update.message.reply_text("⏳ Anlık fiyatlar ve haberler çekiliyor...")
-    await rapor_gonder(context)
-    await haber_tara(context)
-    await msg.edit_text("✅ Rapor ve kritik haber taraması tamamlandı.")
+    await rapor_gonder_cekirdek(context.bot, [chat_id], gece_modu=False)
+    await haber_tara_cekirdek(context.bot, [chat_id], gece_modu=False)
+    await msg.edit_text("✅ Test tamamlandı.")
 
 async def tara_komutu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
     msg = await update.message.reply_text("🔍 Kritik haber taraması başlatılıyor...")
-    await haber_tara(context)
+    await haber_tara_cekirdek(context.bot, [chat_id], gece_modu=False)
     await msg.edit_text("✅ Tarama tamamlandı.")
 
 # --- ANA ÇALIŞTIRICI ---
