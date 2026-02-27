@@ -124,25 +124,50 @@ def run_dummy_server():
 # --- ANLIK PİYASA VERİSİ ---
 def anlik_piyasa_verisi():
     try:
-        tickers = {"BIST": "XU100.IS", "ALTIN": "GC=F", "GUMUS": "SI=F", "BTC": "BTC-USD", "USD": "USDTRY=X"}
-        data = yf.download(list(tickers.values()), period="2d", interval="1d", progress=False, threads=False)['Close'].ffill()
-        curr, prev = data.iloc[-1], data.iloc[-2]
-        zaman = data.index[-1].strftime('%d.%m %H:%M')
+        tickers = {
+            "BIST":  "XU100.IS",
+            "ALTIN": "GC=F",
+            "GUMUS": "SI=F",
+            "BTC":   "BTC-USD",
+            "USD":   "USDTRY=X",
+        }
+
+        fiyatlar = {}
+        onceki   = {}
+
+        for key, sembol in tickers.items():
+            t = yf.Ticker(sembol)
+            fi = t.fast_info          # gerçek zamanlı anlık veri
+            fiyatlar[key] = fi.last_price
+            onceki[key]   = fi.previous_close
+
+        zaman = datetime.now(timezone.utc).astimezone(
+            timezone(timedelta(hours=3))
+        ).strftime('%d.%m %H:%M')
+
+        usd_anlik  = fiyatlar["USD"]
+        usd_onceki = onceki["USD"]
 
         def fmt(key, unit="", is_gram=False):
-            val = curr[tickers[key]]
-            p_val = prev[tickers[key]]
+            val   = fiyatlar[key]
+            p_val = onceki[key]
             if is_gram:
-                val = (val / 31.1035) * curr[tickers["USD"]]
-                p_val = (p_val / 31.1035) * prev[tickers["USD"]]
+                val   = (val   / 31.1035) * usd_anlik
+                p_val = (p_val / 31.1035) * usd_onceki
             diff = ((val - p_val) / p_val) * 100
             icon = "📈" if diff >= 0 else "📉"
             return f"{icon} {key}: **{val:,.2f} {unit}** ({diff:+.2f}%)"
 
-        return (f"📊 **PİYASA RAPORU ({zaman})**\n"
-                f"{fmt('BIST')}\n{fmt('ALTIN', 'TL', True)}\n{fmt('GUMUS', 'TL', True)}\n"
-                f"{fmt('BTC', '$')}\n{fmt('USD', 'TL')}\n---")
-    except:
+        return (
+            f"📊 **ANLIK PİYASA ({zaman})**\n"
+            f"{fmt('BIST')}\n"
+            f"{fmt('ALTIN', 'TL', True)}\n"
+            f"{fmt('GUMUS', 'TL', True)}\n"
+            f"{fmt('BTC', '$')}\n"
+            f"{fmt('USD', 'TL')}\n---"
+        )
+    except Exception as e:
+        logging.error(f"Piyasa verisi hatası: {e}")
         return "⚠️ Fiyat verisi çekilemedi."
 
 # --- HABER ÖNEMİNİ DEĞERLENDİR ---
@@ -305,13 +330,16 @@ async def rapor_gonder(context: ContextTypes.DEFAULT_TYPE):
             continue
 
 # --- KOMUTLAR ---
-async def test_komutu(update, context):
-    await update.message.reply_text("🚀 Stratejik rapor hazırlanıyor...")
+async def test_komutu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("⏳ Anlık fiyatlar ve haberler çekiliyor...")
     await rapor_gonder(context)
-
-async def tara_komutu(update, context):
-    await update.message.reply_text("🔍 Kritik haber taraması başlatılıyor...")
     await haber_tara(context)
+    await msg.edit_text("✅ Rapor ve kritik haber taraması tamamlandı.")
+
+async def tara_komutu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔍 Kritik haber taraması başlatılıyor...")
+    await haber_tara(context)
+    await msg.edit_text("✅ Tarama tamamlandı.")
 
 # --- ANA ÇALIŞTIRICI ---
 if __name__ == '__main__':
