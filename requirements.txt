@@ -1,4 +1,5 @@
 python-telegram-bot[job-queue]
+apscheduler
 psycopg2-binary
 yfinance
 requests
