@@ -1,6 +1,6 @@
-python-telegram-bot[job-queue]
+psycopg2-binary
+yfinance
 requests
 feedparser
-yfinance
+python-telegram-bot
 groq
-python-dateutil
